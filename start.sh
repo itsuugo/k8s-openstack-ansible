@@ -1,5 +1,4 @@
 #!/usr/bin/bash
-set -x
 
 # Configuration variables, modify to fit your environment
 source $HOME/admin.rc
@@ -89,7 +88,7 @@ case "$1" in
     create)
         common
         create_k8s
-		create_storage
+	create_storage
         ;;
     create_k8s)
         common
