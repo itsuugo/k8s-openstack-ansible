@@ -1,0 +1,143 @@
+---
+- hosts: all
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+
+  tasks:
+  - name: Install list of required packages
+    apt: name={{item}} state=installed update_cache=True
+    with_items:
+      - ntp
+      - python-minimal
+      - ceph-common
+      - apt-transport-https
+      - ca-certificates
+
+- hosts: master,workers
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+
+  tasks:
+  - name: Add docker apt-key
+    apt_key:
+      id: 58118E89F3A912897C070ADBF76221572C52609D 
+      keyserver: p80.pool.sks-keyservers.net
+
+  - name: Add docker repo
+    apt_repository: 
+      repo: deb https://apt.dockerproject.org/repo ubuntu-xenial experimental
+      state: present
+      filename: 'docker'
+
+  - name: Install docker
+    apt: name=docker-engine state=installed 
+
+  - name: ensure that docker is started
+    service: name=docker state=started
+
+  - name: Add kubernetes apt-key
+    apt_key:
+      url: "https://packages.cloud.google.com/apt/doc/apt-key.gpg"
+      state: present
+
+  - name: Add kubernetes repo
+    apt_repository: 
+      repo: deb http://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+      filename: 'kubernetes'
+
+
+  - name: install kubernetes packages
+    apt: name={{item}} state=installed update_cache=True
+    with_items:
+      - kubelet
+      - kubeadm
+
+- hosts: master
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+
+  tasks:
+  - name: obtain public ip
+    shell: wget -qO- http://ipecho.net/plain ; echo
+    register: host_ip_public
+
+  - name: Inititalize master with Flannel subnet and access to public ip
+    shell: kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-cert-extra-sans={{ host_ip_public.stdout }} > kubeinit.txt
+    retries: 5
+    delay: 10
+    register: result
+    until: result.rc == 0
+    args:
+      creates: kubeinit.txt
+
+  - name: Obtain bootstrap token
+    shell: kubeadm token list | grep bootstrap | awk '{ print $1 }'
+    register: k8s_token
+
+  - name: Create hidden folder
+    file: 
+      path: /home/{{ ansible_ssh_user }}/.kube
+      state: directory
+      mode: 0775
+    become: no
+
+  - name: Copy kubernetes config file
+    copy: 
+      remote_src: true
+      src: /etc/kubernetes/admin.conf
+      dest: /home/{{ ansible_ssh_user }}/.kube/config
+      owner: "{{ ansible_ssh_user }}"
+      group: "{{ ansible_ssh_user }}"
+
+- hosts: workers
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+
+  tasks:
+  - name: join the cluster
+    shell: kubeadm --skip-preflight-checks --token {{ hostvars['master']['k8s_token']['stdout'] }} join {{ hostvars['master']['ansible_ens3']['ipv4']['address'] }}:6443 > kubeinit.txt
+    args:
+      creates: kubeinit.txt
+
+
+- hosts: master
+  remote_user: ubuntu
+
+  tasks:
+  - name: Install flannel Rbac
+    shell: sudo kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel-rbac.yml
+
+  - name: Install flannel 
+    shell: sudo kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+
+  - name: Install Dashboard 
+    shell: sudo kubectl apply -f https://git.io/kube-dashboard
+
+  - name: WARNING This command permit full access to dashboard from everywhere
+    shell: sudo kubectl create clusterrolebinding add-on-cluster-admin --clusterrole=cluster-admin --user=system:anonymous
+
+  - name: Install Heapster for monitoring RBAC
+    shell: sudo kubectl apply -f https://github.com/kubernetes/heapster/raw/master/deploy/kube-config/rbac/heapster-rbac.yaml
+
+  - name: Install Heapster for monitoring Grafana
+    shell: sudo kubectl apply -f https://github.com/kubernetes/heapster/raw/master/deploy/kube-config/influxdb/grafana.yaml
+
+  - name: Install Heapster for monitoring Heapster
+    shell: sudo kubectl apply -f https://github.com/kubernetes/heapster/raw/master/deploy/kube-config/influxdb/heapster.yaml
+
+  - name: Install Heapster for monitoring Influxdb
+    shell: sudo kubectl apply -f https://github.com/kubernetes/heapster/raw/master/deploy/kube-config/influxdb/influxdb.yaml
+
+  - name: Install example, create namespace
+    shell: sudo kubectl create namespace sock-shop
+
+  - name: Install example, deployment
+    shell: sudo kubectl apply -n sock-shop -f "https://github.com/microservices-demo/microservices-demo/blob/master/deploy/kubernetes/complete-demo.yaml?raw=true"
+
